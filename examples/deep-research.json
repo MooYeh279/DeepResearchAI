@@ -1,0 +1,411 @@
+{
+  "name": "deep-research",
+  "version": "2.0",
+  "description": "多层次深度研究工作流：语义理解 → 三维技能检索(web_search/github_search/arxiv_search) → 三维并行分析(GitHub/arXiv/Web) → 交叉验证 → 审查汇总 → 人类评估 → 报告生成，支持回路迭代改进",
+  "config": {
+    "max_retries": 2,
+    "retry_delay_seconds": 30,
+    "timeout_seconds": 4800
+  },
+  "nodes": [
+    {
+      "id": "semantic_understanding",
+      "name": "语义理解与主题拆解",
+      "type": "claude",
+      "prompt": "你是一个研究主题分析专家。请对以下研究主题进行深度语义理解和拆解。\n\n研究主题: {{ inputs.topic }}\n研究深度: {{ inputs.depth }}\n\n{{#if nodes.human_review.output}}人类反馈（上一轮未通过，请结合以下反馈重新分析）: {{ nodes.human_review.output.feedback }}{{/if}}\n\n请完成以下任务:\n1. 解析主题的核心概念、关键术语和隐含语境\n2. 将主题拆解为3-5个互补的子研究方向\n3. 为每个子方向生成2-3个精确的搜索查询（中英文兼顾，针对不同搜索引擎优化）\n4. 生成一个面向 GitHub 的检索 topic（简短关键词，如 \"react\"、\"machine-learning\"）\n5. 为三个研究维度撰写针对性指导:\n   - GitHub维度: 应关注哪些类型的开源项目、技术栈、工具链\n   - arXiv维度: 应关注哪些研究方向、方法论、理论框架\n   - Web维度: 应关注哪些技术博客、行业报告、实践案例\n\n输出语言: {{ inputs.language }}",
+      "tools": {
+        "allowed": ["Read", "Grep"],
+        "disallowed": ["Write", "Edit", "Bash", "WebFetch", "WebSearch"]
+      },
+      "model": "sonnet",
+      "output": {
+        "type": "object",
+        "properties": {
+          "core_concepts": { "type": "array", "items": { "type": "string" }, "description": "核心概念列表" },
+          "github_topic": { "type": "string", "description": "GitHub 检索关键词" },
+          "subtopics": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string", "description": "子方向名称" },
+                "description": { "type": "string", "description": "子方向描述" },
+                "search_queries": { "type": "array", "items": { "type": "string" }, "description": "搜索查询词列表" }
+              },
+              "required": ["name", "description", "search_queries"]
+            },
+            "description": "子研究方向列表"
+          },
+          "dimension_guidance": {
+            "type": "object",
+            "properties": {
+              "github": { "type": "string" },
+              "arxiv": { "type": "string" },
+              "web": { "type": "string" }
+            },
+            "required": ["github", "arxiv", "web"]
+          }
+        },
+        "required": ["core_concepts", "github_topic", "subtopics", "dimension_guidance"]
+      },
+      "retry": {
+        "max_retries": 2,
+        "retry_delay_seconds": 30,
+        "timeout_seconds": 300
+      }
+    },
+    {
+      "id": "web_search",
+      "name": "Web 多维检索",
+      "type": "script",
+      "command": "python -c \"import json,sys,subprocess;d=json.load(sys.stdin);su=d.get('semantic_understanding',{}).get('subtopics',[]);queries=[q for s in su for q in s.get('search_queries',[])];topic=d.get('inputs',{}).get('topic','');query=queries[0] if queries else topic;r=subprocess.run(['python','.wflow/skills/web_search/scripts/search.py','-n','10','-d','advanced',query],capture_output=True,text=True);print(r.stdout)\"",
+      "timeout_seconds": 120,
+      "output": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "title": { "type": "string" },
+            "url": { "type": "string" },
+            "content": { "type": "string" },
+            "score": { "type": "number" }
+          }
+        }
+      }
+    },
+    {
+      "id": "github_search",
+      "name": "GitHub 仓库检索",
+      "type": "script",
+      "command": "python -c \"import json,sys,subprocess,os;d=json.load(sys.stdin);topic=d.get('semantic_understanding',{}).get('github_topic','') or d.get('inputs',{}).get('topic','');os.makedirs('out/github-search',exist_ok=True);r=subprocess.run(['python','.wflow/skills/github-search/scripts/github_search.py','popular','--topic',topic,'--top','5'],capture_output=True,text=True);print(r.stdout)\"",
+      "timeout_seconds": 120,
+      "output": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "arxiv_search",
+      "name": "arXiv 论文检索",
+      "type": "script",
+      "command": "python -c \"import json,sys,subprocess;d=json.load(sys.stdin);results=[];web_results=d.get('web_search',[]);arxiv_urls=[r.get('url','') for r in web_results if 'arxiv.org' in r.get('url','')];url=arxiv_urls[0] if arxiv_urls else '';r=subprocess.run(['python','.wflow/skills/arxiv_search/scripts/arxiv_paper.py','-f','-s','deep',url] if url else ['python','.wflow/skills/arxiv_search/scripts/arxiv_paper.py','-s','concise',d.get('inputs',{}).get('topic','')],capture_output=True,text=True);print(r.stdout)\"",
+      "timeout_seconds": 120,
+      "output": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string" },
+          "paper_id": { "type": "string" },
+          "title": { "type": "string" },
+          "authors": { "type": "array", "items": { "type": "string" } },
+          "abstract": { "type": "string" },
+          "content": { "type": "string" },
+          "prompt": { "type": "object" }
+        }
+      }
+    },
+    {
+      "id": "github_research",
+      "name": "GitHub 开源技术深度分析",
+      "type": "claude",
+      "prompt": "你是一个开源技术研究专家。请对以下主题进行 GitHub 维度的深度研究。\n\n研究指导: {{ nodes.semantic_understanding.output.dimension_guidance.github }}\nGitHub 检索结果: {{ nodes.github_search.output }}\n核心概念: {{ nodes.semantic_understanding.output.core_concepts }}\n\n请完成以下任务:\n1. 深入分析检索到的开源项目:\n   - 项目定位、核心功能和适用场景\n   - Stars/Forks/Contributors 等社区活跃度指标\n   - 技术架构、代码质量和文档完善度\n   - 许可证类型和商业友好度\n2. 识别主流技术方案和新兴替代方案，绘制技术生态地图\n3. 筛选出 Top 5-10 个最有价值的项目，附详细评估\n\n输出语言: {{ inputs.language }}",
+      "tools": {
+        "allowed": ["WebSearch", "WebFetch", "Read", "Grep"],
+        "disallowed": ["Write", "Edit", "Bash"]
+      },
+      "model": "sonnet",
+      "output": {
+        "type": "object",
+        "properties": {
+          "top_projects": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "url": { "type": "string" },
+                "stars": { "type": "string" },
+                "description": { "type": "string" },
+                "tech_stack": { "type": "array", "items": { "type": "string" } },
+                "pros": { "type": "array", "items": { "type": "string" } },
+                "cons": { "type": "array", "items": { "type": "string" } },
+                "community_health": { "type": "string", "enum": ["excellent", "good", "fair", "poor"] },
+                "license": { "type": "string" }
+              },
+              "required": ["name", "url", "description", "tech_stack", "pros", "cons", "community_health"]
+            }
+          },
+          "technology_trends": { "type": "array", "items": { "type": "string" } },
+          "ecosystem_analysis": { "type": "string" },
+          "summary": { "type": "string" }
+        },
+        "required": ["top_projects", "technology_trends", "ecosystem_analysis", "summary"]
+      },
+      "retry": {
+        "max_retries": 1,
+        "retry_delay_seconds": 60,
+        "timeout_seconds": 900
+      }
+    },
+    {
+      "id": "arxiv_research",
+      "name": "arXiv 学术论文深度分析",
+      "type": "claude",
+      "prompt": "你是一个学术研究分析专家。请对以下主题进行 arXiv 维度的深度研究。\n\n研究指导: {{ nodes.semantic_understanding.output.dimension_guidance.arxiv }}\narXiv 检索结果: {{ nodes.arxiv_search.output }}\nWeb 搜索中的 arXiv 来源: {{ nodes.web_search.output }}\n核心概念: {{ nodes.semantic_understanding.output.core_concepts }}\n\n请使用 arXiv 论文研究工具，完成以下任务:\n1. 深入阅读和分析检索到的论文:\n   - 核心贡献、创新点和与主题的关联度\n   - 研究方法论(实验设计、理论推导、数据集)\n   - 关键实验结果和性能指标\n   - 局限性和未来工作\n2. 识别该领域的主要研究流派和技术路线\n3. 对比不同方法论的优劣和适用场景\n4. 筛选出 Top 5-10 篇最相关论文，附详细分析\n5. 标注每篇论文的引用影响力(high/medium/low)\n6. 如 arxiv_search 返回的 content 包含完整论文正文，请基于正文做深入提炼\n\n输出语言: {{ inputs.language }}",
+      "tools": {
+        "allowed": ["WebSearch", "WebFetch", "Read", "Grep"],
+        "disallowed": ["Write", "Edit", "Bash"]
+      },
+      "model": "sonnet",
+      "output": {
+        "type": "object",
+        "properties": {
+          "top_papers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": { "type": "string" },
+                "url": { "type": "string" },
+                "authors": { "type": "string" },
+                "year": { "type": "string" },
+                "core_contribution": { "type": "string" },
+                "methodology": { "type": "string" },
+                "key_findings": { "type": "array", "items": { "type": "string" } },
+                "limitations": { "type": "array", "items": { "type": "string" } },
+                "citation_impact": { "type": "string", "enum": ["high", "medium", "low"] }
+              },
+              "required": ["title", "url", "core_contribution", "methodology", "key_findings"]
+            }
+          },
+          "research_directions": { "type": "array", "items": { "type": "string" } },
+          "methodology_comparison": { "type": "string" },
+          "summary": { "type": "string" }
+        },
+        "required": ["top_papers", "research_directions", "methodology_comparison", "summary"]
+      },
+      "retry": {
+        "max_retries": 1,
+        "retry_delay_seconds": 60,
+        "timeout_seconds": 900
+      }
+    },
+    {
+      "id": "web_research",
+      "name": "Web 行业实践广度分析",
+      "type": "claude",
+      "prompt": "你是一个技术趋势和行业分析专家。请对以下主题进行 Web 维度的深度研究。\n\n研究指导: {{ nodes.semantic_understanding.output.dimension_guidance.web }}\nWeb 检索结果: {{ nodes.web_search.output }}\n核心概念: {{ nodes.semantic_understanding.output.core_concepts }}\n\n请使用网页研究工具，完成以下任务:\n1. 深入分析检索到的博客文章、技术报告和新闻报道:\n   - 核心观点和实践经验\n   - 企业实际应用案例和落地效果\n   - 技术对比和选型建议\n   - 行业发展趋势和预测\n2. 识别行业共识和被广泛认可的最佳实践\n3. 发现争议话题和不同观点的碰撞\n4. 评估技术的市场成熟度和采用曲线\n5. 筛选出 Top 5-10 篇最有价值的文章/报告\n6. 标注每个信息来源的权威性(high/medium/low)\n\n输出语言: {{ inputs.language }}",
+      "tools": {
+        "allowed": ["WebSearch", "WebFetch", "Read", "Grep"],
+        "disallowed": ["Write", "Edit", "Bash"]
+      },
+      "model": "sonnet",
+      "output": {
+        "type": "object",
+        "properties": {
+          "top_articles": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": { "type": "string" },
+                "url": { "type": "string" },
+                "source": { "type": "string" },
+                "authority": { "type": "string", "enum": ["high", "medium", "low"] },
+                "key_points": { "type": "array", "items": { "type": "string" } },
+                "practical_value": { "type": "string" }
+              },
+              "required": ["title", "url", "source", "key_points"]
+            }
+          },
+          "industry_trends": { "type": "array", "items": { "type": "string" } },
+          "controversial_topics": { "type": "array", "items": { "type": "string" } },
+          "maturity_assessment": { "type": "string" },
+          "summary": { "type": "string" }
+        },
+        "required": ["top_articles", "industry_trends", "maturity_assessment", "summary"]
+      },
+      "retry": {
+        "max_retries": 1,
+        "retry_delay_seconds": 60,
+        "timeout_seconds": 900
+      }
+    },
+    {
+      "id": "cross_validation",
+      "name": "交叉验证与多维评分",
+      "type": "claude",
+      "prompt": "你是一个信息验证和综合评估专家。请对三维度研究成果进行交叉验证和评分。\n\n研究主题: {{ inputs.topic }}\nGitHub 研究结果: {{ nodes.github_research.output }}\narXiv 研究结果: {{ nodes.arxiv_research.output }}\nWeb 研究结果: {{ nodes.web_research.output }}\n\n请完成以下任务:\n1. 交叉验证:\n   - 识别在 GitHub/arXiv/Web 三源中一致出现的发现(高可信度)\n   - 识别仅在单一来源中出现的声明(需标注为待验证)\n   - 识别来源间相互矛盾的结论(需重点关注)\n   - 对每个冲突给出合理的解释或解决建议\n2. 对每个研究维度评分(1-10):\n   - 覆盖度(coverage): 是否全面覆盖了相关子方向\n   - 深度(depth): 分析是否深入而非仅浮于表面\n   - 新鲜度(freshness): 是否引用了最新的发展\n   - 可信度(credibility): 信息来源是否可靠\n   - 综合评分(total): 1-10\n3. 整体评估:\n   - 研究整体质量评分(1-10)\n   - 明确标注信息覆盖缺口\n   - 是否需要补充研究的建议\n\n输出语言: {{ inputs.language }}",
+      "tools": {
+        "allowed": ["Read", "Grep"],
+        "disallowed": ["Write", "Edit", "Bash", "WebSearch", "WebFetch"]
+      },
+      "model": "sonnet",
+      "output": {
+        "type": "object",
+        "properties": {
+          "validated_findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "finding": { "type": "string" },
+                "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+                "sources": { "type": "array", "items": { "type": "string", "enum": ["github", "arxiv", "web"] } },
+                "notes": { "type": "string" }
+              },
+              "required": ["finding", "confidence", "sources"]
+            }
+          },
+          "conflicts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "topic": { "type": "string" },
+                "github_view": { "type": "string" },
+                "arxiv_view": { "type": "string" },
+                "web_view": { "type": "string" },
+                "resolution_suggestion": { "type": "string" }
+              },
+              "required": ["topic", "resolution_suggestion"]
+            }
+          },
+          "dimension_scores": {
+            "type": "object",
+            "properties": {
+              "github": { "type": "object", "properties": { "coverage": {"type":"number"}, "depth": {"type":"number"}, "freshness": {"type":"number"}, "credibility": {"type":"number"}, "total": {"type":"number"} }, "required": ["coverage","depth","freshness","credibility","total"] },
+              "arxiv": { "type": "object", "properties": { "coverage": {"type":"number"}, "depth": {"type":"number"}, "freshness": {"type":"number"}, "credibility": {"type":"number"}, "total": {"type":"number"} }, "required": ["coverage","depth","freshness","credibility","total"] },
+              "web": { "type": "object", "properties": { "coverage": {"type":"number"}, "depth": {"type":"number"}, "freshness": {"type":"number"}, "credibility": {"type":"number"}, "total": {"type":"number"} }, "required": ["coverage","depth","freshness","credibility","total"] }
+            },
+            "required": ["github", "arxiv", "web"]
+          },
+          "overall_score": { "type": "number", "minimum": 1, "maximum": 10 },
+          "coverage_gaps": { "type": "array", "items": { "type": "string" } },
+          "supplement_suggestions": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["validated_findings", "conflicts", "dimension_scores", "overall_score", "coverage_gaps"]
+      },
+      "retry": {
+        "max_retries": 1,
+        "retry_delay_seconds": 60,
+        "timeout_seconds": 600
+      }
+    },
+    {
+      "id": "final_review",
+      "name": "最终审查与综合汇总",
+      "type": "claude",
+      "prompt": "你是一个资深研究审查专家。请对全部研究成果进行最终审查、质量判定和综合汇总。\n\n研究主题: {{ inputs.topic }}\n语义理解: {{ nodes.semantic_understanding.output }}\nGitHub 研究概要: {{ nodes.github_research.output.summary }}\narXiv 研究概要: {{ nodes.arxiv_research.output.summary }}\nWeb 研究概要: {{ nodes.web_research.output.summary }}\n交叉验证结果: {{ nodes.cross_validation.output }}\n\n请完成以下任务:\n1. 质量审查:\n   - 评估研究是否全面覆盖了主题的各个方面\n   - 检查逻辑链条是否完整，有无信息断裂\n   - 评估各结论的证据支持强度(充分/一般/薄弱)\n2. 综合汇总:\n   - 撰写完整的结构化研究综述，包含:\n     * 背景概述与研究范围\n     * 技术现状分析(基于 GitHub 研究)\n     * 学术前沿分析(基于 arXiv 研究)\n     * 行业实践分析(基于 Web 研究)\n     * 交叉验证与可信度评估\n     * 综合结论与关键洞察\n3. 质量判定:\n   - 给出最终评价: ready(可提交人类审核)或 needs_more(需补充研究)\n   - 若为 needs_more，明确指出缺失的方向和具体理由\n4. 提炼3-5个最重要的关键洞察，标注重要程度和支持证据\n\n输出语言: {{ inputs.language }}",
+      "tools": {
+        "allowed": ["Read", "Grep"],
+        "disallowed": ["Write", "Edit", "Bash", "WebSearch", "WebFetch"]
+      },
+      "model": "sonnet",
+      "output": {
+        "type": "object",
+        "properties": {
+          "verdict": { "type": "string", "enum": ["ready", "needs_more"], "description": "是否可提交人类审核" },
+          "synthesis": { "type": "string", "description": "结构化研究综述全文" },
+          "key_insights": {
+            "type": "array", "minItems": 3, "maxItems": 5,
+            "items": {
+              "type": "object",
+              "properties": {
+                "insight": { "type": "string" },
+                "importance": { "type": "string", "enum": ["critical", "high", "medium"] },
+                "supporting_evidence": { "type": "array", "items": { "type": "string" } }
+              },
+              "required": ["insight", "importance", "supporting_evidence"]
+            }
+          },
+          "future_directions": { "type": "array", "items": { "type": "string" } },
+          "gaps": { "type": "array", "items": { "type": "string" }, "description": "信息缺口(verdict为needs_more时必填)" },
+          "evidence_assessment": { "type": "string", "description": "证据支持强度总体评估" }
+        },
+        "required": ["verdict", "synthesis", "key_insights", "future_directions", "evidence_assessment"]
+      },
+      "retry": {
+        "max_retries": 1,
+        "retry_delay_seconds": 60,
+        "timeout_seconds": 600
+      }
+    },
+    {
+      "id": "human_review",
+      "name": "人类评估",
+      "type": "human_review",
+      "prompt": "请评估以下深度研究的结果是否达到预期标准:\n\n研究主题: {{ inputs.topic }}\n整体质量评分: {{ nodes.cross_validation.output.overall_score }}/10\n维度评分: GitHub={{ nodes.cross_validation.output.dimension_scores.github.total }}/10, arXiv={{ nodes.cross_validation.output.dimension_scores.arxiv.total }}/10, Web={{ nodes.cross_validation.output.dimension_scores.web.total }}/10\n\n研究综述:\n{{ nodes.final_review.output.synthesis }}\n\n关键洞察:\n{{ nodes.final_review.output.key_insights }}\n\n覆盖缺口: {{ nodes.cross_validation.output.coverage_gaps }}\n\n---\n请做出审核决定:\n- 通过: 研究质量达标，将生成最终综述报告并持久化存储\n- 不通过: 请提供详细的反馈和改进方向，工作流将重新执行语义理解和搜索(带人类反馈)",
+      "output": {
+        "type": "object",
+        "properties": {
+          "approved": { "type": "boolean", "description": "是否通过审核" },
+          "feedback": { "type": "string", "description": "审核反馈(不通过时需包含具体的改进方向)" },
+          "rating": { "type": "number", "minimum": 1, "maximum": 10, "description": "人类质量评分" }
+        },
+        "required": ["approved", "feedback", "rating"]
+      }
+    },
+    {
+      "id": "generate_report",
+      "name": "生成综述报告",
+      "type": "claude",
+      "prompt": "你是一个技术报告撰写专家。请基于所有研究成果，生成一份完整、专业的研究综述报告并持久化存储到磁盘。\n\n研究主题: {{ inputs.topic }}\n语义理解: {{ nodes.semantic_understanding.output }}\n最终综述: {{ nodes.final_review.output.synthesis }}\n关键洞察: {{ nodes.final_review.output.key_insights }}\n交叉验证发现: {{ nodes.cross_validation.output.validated_findings }}\nGitHub 维度完整结果: {{ nodes.github_research.output }}\narXiv 维度完整结果: {{ nodes.arxiv_research.output }}\nWeb 维度完整结果: {{ nodes.web_research.output }}\n人类评估: {{ nodes.human_review.output }}\n\n请完成以下任务:\n1. 生成一份结构化的 Markdown 研究报告，包含以下章节:\n   - 研究概览(主题、范围、方法、时间)\n   - 核心发现与关键洞察\n   - 技术现状分析(GitHub 开源生态)\n   - 学术前沿分析(arXiv 论文综述)\n   - 行业实践分析(Web 来源综述)\n   - 交叉验证与可信度评估\n   - 综合结论与建议\n   - 参考文献与资源清单\n2. 将报告保存为 Markdown 文件\n3. 确认文件已成功写入\n\n输出语言: {{ inputs.language }}",
+      "tools": {
+        "allowed": ["Read", "Write", "Edit", "Bash"],
+        "disallowed": ["WebSearch", "WebFetch"]
+      },
+      "model": "sonnet",
+      "output": {
+        "type": "object",
+        "properties": {
+          "report_path": { "type": "string", "description": "报告文件的绝对路径" },
+          "report_summary": { "type": "string", "description": "报告执行摘要" },
+          "word_count": { "type": "number", "description": "报告字数" },
+          "sections": { "type": "array", "items": { "type": "string" }, "description": "报告章节列表" }
+        },
+        "required": ["report_path", "report_summary"]
+      },
+      "retry": {
+        "max_retries": 1,
+        "retry_delay_seconds": 30,
+        "timeout_seconds": 600
+      }
+    }
+  ],
+  "edges": [
+    { "id": "e1", "from": "semantic_understanding", "to": "web_search" },
+    { "id": "e2", "from": "semantic_understanding", "to": "github_search" },
+    { "id": "e3", "from": "web_search", "to": "arxiv_search" },
+    { "id": "e4", "from": "web_search", "to": "web_research" },
+    { "id": "e5", "from": "github_search", "to": "github_research" },
+    { "id": "e6", "from": "arxiv_search", "to": "arxiv_research" },
+    { "id": "e7", "from": "github_research", "to": "cross_validation" },
+    { "id": "e8", "from": "arxiv_research", "to": "cross_validation" },
+    { "id": "e9", "from": "web_research", "to": "cross_validation" },
+    { "id": "e10", "from": "cross_validation", "to": "final_review" },
+    { "id": "e11", "from": "final_review", "to": "human_review" },
+    { "id": "e12", "from": "human_review", "to": "generate_report", "condition": "{{ nodes.human_review.output.approved }} == true" },
+    { "id": "e13", "from": "human_review", "to": "semantic_understanding", "condition": "{{ nodes.human_review.output.approved }} == false" },
+    { "id": "e14", "from": "generate_report", "to": null }
+  ],
+  "inputs": {
+    "topic": {
+      "type": "string",
+      "required": true,
+      "description": "需要深度研究的泛化主题，例如'大语言模型在代码审查中的应用'"
+    },
+    "language": {
+      "type": "string",
+      "required": false,
+      "default": "zh",
+      "enum": ["zh", "en"],
+      "description": "输出报告语言：zh(中文) / en(英文)"
+    },
+    "depth": {
+      "type": "string",
+      "required": false,
+      "default": "standard",
+      "enum": ["quick", "standard", "deep"],
+      "description": "研究深度：quick(快速概览) / standard(标准研究) / deep(深度挖掘)"
+    }
+  }
+}
