@@ -172,7 +172,7 @@
       "id": "review_gate",
       "name": "审核汇聚判定",
       "type": "script",
-      "command": "python -c \"import json,sys;d=json.load(sys.stdin);ra=d.get('review_academic',{});ri=d.get('review_industry',{});rp=d.get('review_practical',{});all_ok=ra.get('approved',False) and ri.get('approved',False) and rp.get('approved',False);rejected=[k for k,v in [('academic',ra),('industry',ri),('practical',rp)] if not v.get('approved',True)];print(json.dumps({'all_approved':all_ok,'rejected':rejected,'reviews':{'academic':ra,'industry':ri,'practical':rp}},ensure_ascii=False))\"",
+      "command": "python -c \"import json,sys;d=json.load(sys.stdin);src=d.get('upstream',d) if 'upstream' in d else d;src=src.get('nodes',src) if 'nodes' in src else src;ra=src.get('review_academic',{});ra=ra.get('output',ra) if 'output' in ra else ra;ri=src.get('review_industry',{});ri=ri.get('output',ri) if 'output' in ri else ri;rp=src.get('review_practical',{});rp=rp.get('output',rp) if 'output' in rp else rp;all_ok=bool(ra.get('approved')) and bool(ri.get('approved')) and bool(rp.get('approved'));rejected=[k for k,v in [('academic',ra),('industry',ri),('practical',rp)] if not v.get('approved')];print(json.dumps({'all_approved':all_ok,'rejected':rejected,'reviews':{'academic':ra,'industry':ri,'practical':rp}},ensure_ascii=False))\"",
       "timeout_seconds": 30,
       "output": {
         "type": "object",
