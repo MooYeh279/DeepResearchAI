@@ -4,7 +4,7 @@ description: "Search GitHub projects by topic and generate a structured analysis
 trigger: /github-search
 ---
 
-# /github-search
+# github-search
 
 Search GitHub projects by topic and generate structured analysis reports.
 
